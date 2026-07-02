@@ -56,12 +56,11 @@ async function scrapeGoogleMaps(query) {
     let retries = 0;
 
     console.log("Scrolling to load businesses...");
-    while (uniqueUrls.size < TARGET_RESULTS) {
+    while (true) {
       const links = await locators.businessLinks(page).evaluateAll(els => els.map(e => e.href));
       links.forEach(link => uniqueUrls.add(link));
       
-      console.log(`Collected ${uniqueUrls.size}/${TARGET_RESULTS} URLs...`);
-      if (uniqueUrls.size >= TARGET_RESULTS) break;
+      console.log(`Collected ${uniqueUrls.size} URLs...`);
       
       if (uniqueUrls.size === previousCount) {
         retries++;
@@ -79,7 +78,7 @@ async function scrapeGoogleMaps(query) {
       await page.waitForTimeout(2000);
     }
 
-    const urlsToProcess = Array.from(uniqueUrls).slice(0, TARGET_RESULTS);
+    const urlsToProcess = Array.from(uniqueUrls);
     console.log(`\nSuccessfully collected ${urlsToProcess.length} businesses. Extracting details...\n`);
 
     const businesses = [];
@@ -89,8 +88,13 @@ async function scrapeGoogleMaps(query) {
       const url = urlsToProcess[i];
       console.log(`Processing ${i + 1}/${urlsToProcess.length}...`);
       
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      await locators.heading(page).waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+      try {
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await locators.heading(page).waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+      } catch (err) {
+        console.error(`Failed to load ${url}:`, err.message);
+        continue;
+      }
       
       const name = await extractText(locators.heading(page));
       if (name === 'N/A' || name === 'Results') continue;

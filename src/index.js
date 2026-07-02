@@ -1,19 +1,79 @@
 const { scrapeGoogleMaps } = require('./services/scraper');
+const { scrapeInstagramLeads } = require('./services/googleSearchScraper');
 const { saveToCsv } = require('./utils/csv');
 const { enhanceLeads } = require('./utils/leadFilter');
 const { validateHealth } = require('./services/websiteHealthChecker');
 const { scoreAndSortLeads } = require('./utils/leadScorer');
 const { runEmailDiscovery } = require('./services/emailDiscovery');
 const { ALL_LEADS_CSV, NO_WEBSITE_CSV, WEBSITE_LEADS_CSV, PRIORITIZED_LEADS_CSV, EMAIL_LEADS_CSV } = require('./config');
+const { getNeighborhoodsForCity } = require('./utils/neighborhoods');
 
 async function main() {
   console.log("Lead Finder Started 🚀\n");
 
-  const query = 'cafes in gurugram';
+  let query = process.argv[2];
+  let isInstagram = false;
+
+  if (query === '--instagram') {
+    isInstagram = true;
+    query = process.argv[3];
+  } else if (process.argv[3] === '--instagram') {
+    isInstagram = true;
+  }
+
+  if (!query) {
+    console.log("Backend is ready and listening for API triggers!");
+    console.log("To run manually from terminal, provide a query: node src/index.js \"cafes in delhi\"");
+    return;
+  }
 
   try {
     // 1. Scrape data
-    let businesses = await scrapeGoogleMaps(query);
+    let businesses = [];
+    
+    if (isInstagram) {
+      console.log("Running Instagram Scraper via Google Search...");
+      businesses = await scrapeInstagramLeads(query);
+    } else {
+      const inIndex = query.toLowerCase().indexOf(" in ");
+      
+      if (inIndex !== -1) {
+        const baseQuery = query.substring(0, inIndex).trim();
+        const city = query.substring(inIndex + 4).trim();
+        let neighborhoods = getNeighborhoodsForCity(city);
+        if (process.env.LIMIT_NEIGHBORHOODS === 'true') {
+          neighborhoods = neighborhoods.slice(0, 2);
+        }
+        
+        if (neighborhoods.length > 0) {
+          console.log(`Found ${neighborhoods.length} neighborhoods for ${city}. Initiating chunked scraping...`);
+          const uniqueBusinesses = new Map();
+          
+          for (const nh of neighborhoods) {
+            const chunkQuery = `${baseQuery} in ${nh}, ${city}`;
+            console.log(`\n--- Scraping Chunk: ${chunkQuery} ---`);
+            try {
+              const chunkResults = await scrapeGoogleMaps(chunkQuery);
+              chunkResults.forEach(b => {
+                 const key = b.Phone !== 'N/A' ? b.Phone : `${b.Name}-${b.Address}`;
+                 if (!uniqueBusinesses.has(key)) {
+                   uniqueBusinesses.set(key, b);
+                 }
+              });
+              // 3-second delay between chunks to avoid rate limiting
+              await new Promise(r => setTimeout(r, 3000));
+            } catch (err) {
+              console.error(`Error scraping chunk ${chunkQuery}:`, err.message);
+            }
+          }
+          businesses = Array.from(uniqueBusinesses.values());
+        } else {
+          businesses = await scrapeGoogleMaps(query);
+        }
+      } else {
+        businesses = await scrapeGoogleMaps(query);
+      }
+    }
 
     // 2. Enhance and filter leads
     if (businesses && businesses.length > 0) {

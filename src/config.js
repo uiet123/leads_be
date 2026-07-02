@@ -9,5 +9,5 @@ module.exports = {
   WEBSITE_LEADS_CSV: path.join(__dirname, '..', 'output', 'website-leads.csv'),
   PRIORITIZED_LEADS_CSV: path.join(__dirname, '..', 'output', 'prioritized-leads.csv'),
   EMAIL_LEADS_CSV: path.join(__dirname, '..', 'output', 'email-leads.csv'),
-  TARGET_RESULTS: parseInt(process.env.TARGET_RESULTS || '50', 10),
+  TARGET_RESULTS: parseInt(process.env.TARGET_RESULTS || '250', 10),
 };
