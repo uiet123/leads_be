@@ -49,7 +49,8 @@ async function saveToCsv(businesses, filePath) {
       { id: 'Priority', title: 'Priority' },
       { id: 'PrimaryEmail', title: 'Primary Email' },
       { id: 'AllEmails', title: 'All Emails' },
-      { id: 'EmailFound', title: 'Email Found' }
+      { id: 'EmailFound', title: 'Email Found' },
+      { id: '_username', title: 'Instagram Username' }
     ]
   });
 

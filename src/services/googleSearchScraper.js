@@ -68,7 +68,7 @@ function buildLeadFromText(href, rawName, blockText) {
       if (pathParts.length > 0 && !['p', 'reel', 'tv', 'explore', 'tags', 'stories'].includes(pathParts[0].toLowerCase())) {
         username = '@' + pathParts[0];
       }
-    } catch (e) {}
+    } catch (e) { }
   }
 
   // Build final name: prefer "DisplayName (@username)" format
@@ -101,58 +101,104 @@ function buildLeadFromText(href, rawName, blockText) {
 }
 
 /**
+ * Build multiple Google dork variations from a single user query to maximise
+ * unique lead coverage. A "keyword in city" query is split into keyword + city;
+ * each variation targets a different slice of Google's (capped) result set.
+ * @param {string} query e.g. "clothing brand in surat"
+ * @returns {string[]} deduped list of dorks, base dork first
+ */
+function buildDorks(query) {
+  const inIdx = query.toLowerCase().indexOf(' in ');
+  let keyword = query.trim();
+  let city = '';
+  if (inIdx !== -1) {
+    keyword = query.substring(0, inIdx).trim();
+    city = query.substring(inIdx + 4).trim();
+  }
+
+  const loc = city ? ` "${city}"` : '';
+  const base = `site:instagram.com "${keyword}"${loc}`;
+
+  const dorks = [
+    base,                                    // exact-match keyword (+ city)
+    `${base} "@gmail.com"`,                   // profiles exposing a gmail address
+    `${base} "email"`,                        // bios that mention an email/contact
+    `${base} "whatsapp"`,                     // bios with a WhatsApp contact
+    // Looser, unquoted variant broadens recall beyond the exact phrase.
+    city ? `site:instagram.com ${keyword} ${city}` : `site:instagram.com ${keyword}`,
+  ];
+
+  return [...new Set(dorks)];
+}
+
+/**
  * Fetch Instagram leads via the Serper.dev Google Search API.
  * Reliable and complete: no CAPTCHA and returns the full organic result set
  * Google exposes for the query (paginated until Google runs out of results).
  * @param {string} dork The full Google query (e.g. site:instagram.com "dentists" "delhi")
  * @returns {Array} Array of business objects
  */
-async function fetchInstagramLeadsViaSerper(dork) {
+async function fetchInstagramLeadsViaSerper(dorks) {
   const businesses = [];
   const uniqueLinks = new Set();
 
-  console.log('Using Serper.dev API for Google search (reliable full results)...');
+  console.log(`Using Serper.dev API for Google search (${dorks.length} query variations)...`);
 
-  for (let pageNum = 1; pageNum <= INSTAGRAM_MAX_PAGES; pageNum++) {
-    let organic = [];
-    try {
-      const resp = await axios.post(
-        'https://google.serper.dev/search',
-        { q: dork, gl: 'in', hl: 'en', num: 100, page: pageNum },
-        {
-          headers: { 'X-API-KEY': SERPER_API_KEY, 'Content-Type': 'application/json' },
-          timeout: 30000,
-        }
-      );
-      organic = (resp.data && resp.data.organic) || [];
-    } catch (e) {
-      const status = e.response ? e.response.status : e.message;
-      console.log(`  ⚠️ Serper request failed on page ${pageNum}: ${status}`);
-      break;
-    }
+  for (const dork of dorks) {
+    console.log(`\n🔎 Dork: ${dork}`);
 
-    if (organic.length === 0) {
-      console.log(`  No more results after page ${pageNum - 1}. Google has no further results.`);
-      break;
-    }
-
-    console.log(`Extracting leads from page ${pageNum} (${organic.length} results)...`);
-
-    for (const item of organic) {
-      const href = item.link || '';
-      if (!href.includes('instagram.com/') || uniqueLinks.has(href)) continue;
-      if (href.includes('/explore/')) continue;
-      uniqueLinks.add(href);
-
-      const title = item.title || '';
-      const snippet = item.snippet || '';
-      const blockText = `${title}\n${snippet}`;
-
-      const lead = buildLeadFromText(href, title, blockText);
-      if (lead) {
-        businesses.push(lead);
-        console.log(`  ✓ ${lead.Name} | Email: ${lead.PrimaryEmail} | Phone: ${lead.Phone}`);
+    for (let pageNum = 1; pageNum <= INSTAGRAM_MAX_PAGES; pageNum++) {
+      let organic = [];
+      let apiMessage = '';
+      try {
+        const resp = await axios.post(
+          'https://google.serper.dev/search',
+          // num must stay <= 10: Serper's free plan rejects num > 10 with
+          // "Query pattern not allowed for free accounts" (empty result set).
+          // Volume comes from paginating up to INSTAGRAM_MAX_PAGES instead.
+          { q: dork, gl: 'in', hl: 'en', num: 10, page: pageNum },
+          {
+            headers: { 'X-API-KEY': SERPER_API_KEY, 'Content-Type': 'application/json' },
+            timeout: 30000,
+          }
+        );
+        organic = (resp.data && resp.data.organic) || [];
+        apiMessage = (resp.data && resp.data.message) || '';
+      } catch (e) {
+        const status = e.response ? e.response.status : e.message;
+        console.log(`  ⚠️ Serper request failed on page ${pageNum}: ${status}`);
+        break;
       }
+
+      // Serper returns HTTP 200 with a `message` (and no results) when the
+      // query/plan is rejected — surface it instead of silently reporting zero.
+      if (organic.length === 0) {
+        if (apiMessage) {
+          console.log(`  ⚠️ Serper: ${apiMessage} — skipping this dork.`);
+        } else {
+          console.log(`  No more results after page ${pageNum - 1}. Google has no further results.`);
+        }
+        break;
+      }
+
+      let newOnPage = 0;
+      for (const item of organic) {
+        const href = item.link || '';
+        if (!href.includes('instagram.com/') || uniqueLinks.has(href)) continue;
+        if (href.includes('/explore/')) continue;
+        uniqueLinks.add(href);
+        newOnPage++;
+
+        const title = item.title || '';
+        const snippet = item.snippet || '';
+        const blockText = `${title}\n${snippet}`;
+
+        const lead = buildLeadFromText(href, title, blockText);
+        if (lead) {
+          businesses.push(lead);
+        }
+      }
+      console.log(`  page ${pageNum}: +${newOnPage} new links (running total: ${businesses.length} leads)`);
     }
   }
 
@@ -196,239 +242,234 @@ async function scrapeInstagramLeads(query) {
       window.chrome = { runtime: {} };
     });
 
-    // Build a quoted dork for better exact-match results: "keyword" "city".
-    // Split on " in " so "real estate agents in delhi" -> "real estate agents" "delhi".
-    const inIdx = query.toLowerCase().indexOf(' in ');
-    let dork;
-    if (inIdx !== -1) {
-      const keyword = query.substring(0, inIdx).trim();
-      const city = query.substring(inIdx + 4).trim();
-      dork = `site:instagram.com "${keyword}" "${city}"`;
-    } else {
-      dork = `site:instagram.com "${query.trim()}"`;
-    }
-    console.log(`Searching Google for Instagram leads: ${dork}`);
+    // Build several dork variations. Each one is capped by Google at a few
+    // hundred results, but each surfaces a DIFFERENT slice, so merging their
+    // deduped results yields far more unique leads than any single query.
+    const dorks = buildDorks(query);
+    const dork = dorks[0]; // base dork used by the browser fallback below
+    console.log(`Searching Google for Instagram leads (${dorks.length} variations):`);
+    dorks.forEach((d) => console.log(`  • ${d}`));
 
     let businesses = [];
 
     if (SERPER_API_KEY) {
       // ---- Preferred path: Serper.dev SERP API (reliable, no CAPTCHA, full set) ----
-      businesses = await fetchInstagramLeadsViaSerper(dork);
+      businesses = await fetchInstagramLeadsViaSerper(dorks);
       console.log(`\n✅ Total Instagram leads via Serper: ${businesses.length}`);
     } else {
       // ---- Fallback path: scrape Google directly via a stealth browser ----
 
-    // Step 1: Visit Google homepage to get cookies
-    await page.goto('https://www.google.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await randomDelay(1500, 2500);
+      // Step 1: Visit Google homepage to get cookies
+      await page.goto('https://www.google.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await randomDelay(1500, 2500);
 
-    // Step 2: Handle consent page if present
-    try {
-      const consent = await page.$('button:has-text("Accept all"), button:has-text("I agree"), #L2AGLb');
-      if (consent) {
-        console.log('Handling Google consent page...');
-        await consent.click();
-        await randomDelay(1000, 2000);
-      }
-    } catch (e) { /* no consent page */ }
-
-    // Step 3: Type into search box like a human (avoids bot detection vs direct URL)
-    const searchBox = await page.$('textarea[name="q"], input[name="q"]');
-    if (searchBox) {
-      await searchBox.click();
-      await randomDelay(300, 600);
-      await searchBox.type(dork, { delay: 30 + Math.random() * 40 }); // random typing speed
-      await randomDelay(500, 1000);
-      await page.keyboard.press('Enter');
-    } else {
-      // Fallback: direct navigation
-      await page.goto(`https://www.google.com/search?q=${encodeURIComponent(dork)}&num=100&filter=0`, { waitUntil: 'domcontentloaded' });
-    }
-
-    await randomDelay(3000, 5000);
-
-    // Force Google to include "omitted similar results" (filter=0). By default
-    // Google collapses most site: results after ~3-5 pages and drops the Next
-    // button, which is why crawls stall early. filter=0 unlocks the full set.
-    try {
-      const currentUrl = page.url();
-      if (currentUrl.includes('/search') && !currentUrl.includes('filter=0')) {
-        const sep = currentUrl.includes('?') ? '&' : '?';
-        console.log('Re-running with filter=0 to include omitted similar results...');
-        await page.goto(`${currentUrl}${sep}filter=0`, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await randomDelay(2500, 4000);
-      }
-    } catch (e) {
-      console.log('Could not apply filter=0, continuing with default results.');
-    }
-
-    const uniqueLinks = new Set();
-
-    let hasNextPage = true;
-    let pageCount = 0;
-
-    while (hasNextPage && pageCount < INSTAGRAM_MAX_PAGES) {
-      pageCount++;
-      console.log(`Extracting leads from page ${pageCount}/${INSTAGRAM_MAX_PAGES}...`);
-
-      // Check for CAPTCHA
-      const pageText = await page.innerText('body').catch(() => '');
-      if (pageText.includes('unusual traffic') || pageText.includes("aren't a robot")) {
-        console.log('⚠️ Google CAPTCHA detected! Cannot extract results. Try again later or use a different IP.');
-        hasNextPage = false;
-        break;
-      }
-
-      // Strategy: Instead of relying on div.g, find ALL links on the page that go to Instagram
-      // and extract surrounding text for email/name/phone data
-      const allLinks = await page.$$('a[href*="instagram.com"]');
-      console.log(`Found ${allLinks.length} Instagram links on page ${pageCount}`);
-
-      if (allLinks.length === 0) {
-        console.log('⚠️ No Instagram links found on this page.');
-        // Check if there are any search results at all
-        const bodyText = pageText.substring(0, 200);
-        console.log(`  Page preview: ${bodyText}`);
-        hasNextPage = false;
-        break;
-      }
-
-      for (const linkEl of allLinks) {
-        try {
-          const href = await linkEl.getAttribute('href');
-          if (!href || !href.includes('instagram.com/') || uniqueLinks.has(href)) continue;
-          // Skip google tracking links and non-profile URLs
-          if (href.includes('google.com') || href.includes('webcache') || href.includes('/explore/')) continue;
-          
-          uniqueLinks.add(href);
-
-          // Get the parent container to extract surrounding text
-          // Walk up the DOM to find the result container
-          const parentBlock = await linkEl.evaluateHandle(el => {
-            // Walk up until we find a reasonably sized parent block
-            let parent = el.parentElement;
-            for (let i = 0; i < 8; i++) {
-              if (parent && parent.parentElement) {
-                parent = parent.parentElement;
-                // Stop if we hit a container that has enough text content
-                if (parent.innerText && parent.innerText.length > 50) break;
-              }
-            }
-            return parent;
-          });
-
-          const blockText = await parentBlock.evaluate(el => el ? el.innerText : '').catch(() => '');
-
-          // Extract name from link text or block heading
-          let name = '';
-          // Try getting name from the link's h3 or nearby heading
-          const h3 = await linkEl.$('h3');
-          if (h3) {
-            name = await h3.innerText().catch(() => '');
-          }
-          if (!name) {
-            // Try the link's own text
-            name = await linkEl.innerText().catch(() => '');
-          }
-          if (!name && blockText) {
-            // Use first line of block text
-            name = blockText.split('\n')[0];
-          }
-
-          // Extract username from title if it exists (e.g. "Name (@username)")
-          const handleMatch = name.match(/\(@([^)]+)\)/);
-          const titleHandle = handleMatch ? '@' + handleMatch[1].replace('@', '') : '';
-
-          // Clean name
-          name = name.split('•')[0].split('|')[0].split('-')[0].trim();
-          name = name.replace(/\(@[^)]+\)/g, '').trim();
-          name = name.replace(/Instagram.*$/i, '').trim();
-          
-          // Filter out garbage names like "Read more", "Call or WhatsApp", or just phone numbers
-          const garbageNames = ['read more', 'call or whatsapp', 'call/whatsapp', 'call', 'whatsapp'];
-          if (garbageNames.includes(name.toLowerCase()) || /^\+?\d[\d\s-]+$/.test(name)) {
-            name = '';
-          }
-
-          // Extract username from multiple sources (priority order)
-          let username = titleHandle;
-
-          // Source 2: Look for "Instagram · username" pattern in block text (Google shows this for every result)
-          if (!username && blockText) {
-            const igDotMatch = blockText.match(/Instagram\s*[·•]\s*([a-zA-Z0-9._]+)/i);
-            if (igDotMatch && igDotMatch[1] && igDotMatch[1].length > 1) {
-              username = '@' + igDotMatch[1];
-            }
-          }
-
-          // Source 3: Extract from URL path (only works for profile links, not /p/ or /reel/)
-          if (!username) {
-            try {
-              const urlObj = new URL(href);
-              const pathParts = urlObj.pathname.split('/').filter(Boolean);
-              if (pathParts.length > 0 && !['p', 'reel', 'tv', 'explore', 'tags', 'stories'].includes(pathParts[0].toLowerCase())) {
-                username = '@' + pathParts[0];
-              }
-            } catch (e) {}
-          }
-
-          // Build final name: prefer "DisplayName (@username)" format
-          if (!name || name.length < 2 || name === 'Instagram') {
-            // No good display name, just use username
-            name = username || 'Instagram Profile';
-          } else if (username && !name.includes(username)) {
-            // Has both display name and username
-            name = `${name} (${username})`;
-          }
-
-          if (name === 'Instagram Profile') continue;
-
-          const emails = extractEmails(blockText);
-          const email = emails.length > 0 ? emails[0] : 'N/A';
-          const phone = extractPhone(blockText);
-
-          businesses.push({
-            Name: name,
-            Rating: 'N/A',
-            Reviews: '0',
-            Address: 'Instagram Profile',
-            Phone: phone,
-            Website: href,
-            WebsiteStatus: 'NO_WEBSITE',
-            PrimaryEmail: email,
-            AllEmails: emails.join(', '),
-            EmailFound: email !== 'N/A' ? 'YES' : 'NO',
-            Priority: email !== 'N/A' ? 'HIGH' : 'LOW',
-            _username: username // internal field for profile enrichment
-          });
-
-          console.log(`  ✓ ${name} | Email: ${email} | Phone: ${phone}`);
-        } catch (e) {
-          // ignore individual extraction errors
+      // Step 2: Handle consent page if present
+      try {
+        const consent = await page.$('button:has-text("Accept all"), button:has-text("I agree"), #L2AGLb');
+        if (consent) {
+          console.log('Handling Google consent page...');
+          await consent.click();
+          await randomDelay(1000, 2000);
         }
+      } catch (e) { /* no consent page */ }
+
+      // Step 3: Type into search box like a human (avoids bot detection vs direct URL)
+      const searchBox = await page.$('textarea[name="q"], input[name="q"]');
+      if (searchBox) {
+        await searchBox.click();
+        await randomDelay(300, 600);
+        await searchBox.type(dork, { delay: 30 + Math.random() * 40 }); // random typing speed
+        await randomDelay(500, 1000);
+        await page.keyboard.press('Enter');
+      } else {
+        // Fallback: direct navigation
+        await page.goto(`https://www.google.com/search?q=${encodeURIComponent(dork)}&num=100&filter=0`, { waitUntil: 'domcontentloaded' });
       }
 
-      // Try to go to next page
-      await randomDelay(2000, 4000);
-      const nextButton = await page.$('a#pnnext, a[aria-label="Next"], a:has-text("Next")');
-      if (nextButton && pageCount < INSTAGRAM_MAX_PAGES) {
-        console.log("Navigating to next page...");
-        try {
-          await Promise.all([
-            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }),
-            nextButton.click(),
-          ]);
-          await randomDelay(3000, 5000);
-        } catch (e) {
-          console.log('Failed to navigate to next page:', e.message);
+      await randomDelay(3000, 5000);
+
+      // Force Google to include "omitted similar results" (filter=0). By default
+      // Google collapses most site: results after ~3-5 pages and drops the Next
+      // button, which is why crawls stall early. filter=0 unlocks the full set.
+      try {
+        const currentUrl = page.url();
+        if (currentUrl.includes('/search') && !currentUrl.includes('filter=0')) {
+          const sep = currentUrl.includes('?') ? '&' : '?';
+          console.log('Re-running with filter=0 to include omitted similar results...');
+          await page.goto(`${currentUrl}${sep}filter=0`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await randomDelay(2500, 4000);
+        }
+      } catch (e) {
+        console.log('Could not apply filter=0, continuing with default results.');
+      }
+
+      const uniqueLinks = new Set();
+
+      let hasNextPage = true;
+      let pageCount = 0;
+
+      while (hasNextPage && pageCount < INSTAGRAM_MAX_PAGES) {
+        pageCount++;
+        console.log(`Extracting leads from page ${pageCount}/${INSTAGRAM_MAX_PAGES}...`);
+
+        // Check for CAPTCHA
+        const pageText = await page.innerText('body').catch(() => '');
+        if (pageText.includes('unusual traffic') || pageText.includes("aren't a robot")) {
+          console.log('⚠️ Google CAPTCHA detected! Cannot extract results. Try again later or use a different IP.');
+          hasNextPage = false;
+          break;
+        }
+
+        // Strategy: Instead of relying on div.g, find ALL links on the page that go to Instagram
+        // and extract surrounding text for email/name/phone data
+        const allLinks = await page.$$('a[href*="instagram.com"]');
+        console.log(`Found ${allLinks.length} Instagram links on page ${pageCount}`);
+
+        if (allLinks.length === 0) {
+          console.log('⚠️ No Instagram links found on this page.');
+          // Check if there are any search results at all
+          const bodyText = pageText.substring(0, 200);
+          console.log(`  Page preview: ${bodyText}`);
+          hasNextPage = false;
+          break;
+        }
+
+        for (const linkEl of allLinks) {
+          try {
+            const href = await linkEl.getAttribute('href');
+            if (!href || !href.includes('instagram.com/') || uniqueLinks.has(href)) continue;
+            // Skip google tracking links and non-profile URLs
+            if (href.includes('google.com') || href.includes('webcache') || href.includes('/explore/')) continue;
+
+            uniqueLinks.add(href);
+
+            // Get the parent container to extract surrounding text
+            // Walk up the DOM to find the result container
+            const parentBlock = await linkEl.evaluateHandle(el => {
+              // Walk up until we find a reasonably sized parent block
+              let parent = el.parentElement;
+              for (let i = 0; i < 8; i++) {
+                if (parent && parent.parentElement) {
+                  parent = parent.parentElement;
+                  // Stop if we hit a container that has enough text content
+                  if (parent.innerText && parent.innerText.length > 50) break;
+                }
+              }
+              return parent;
+            });
+
+            const blockText = await parentBlock.evaluate(el => el ? el.innerText : '').catch(() => '');
+
+            // Extract name from link text or block heading
+            let name = '';
+            // Try getting name from the link's h3 or nearby heading
+            const h3 = await linkEl.$('h3');
+            if (h3) {
+              name = await h3.innerText().catch(() => '');
+            }
+            if (!name) {
+              // Try the link's own text
+              name = await linkEl.innerText().catch(() => '');
+            }
+            if (!name && blockText) {
+              // Use first line of block text
+              name = blockText.split('\n')[0];
+            }
+
+            // Extract username from title if it exists (e.g. "Name (@username)")
+            const handleMatch = name.match(/\(@([^)]+)\)/);
+            const titleHandle = handleMatch ? '@' + handleMatch[1].replace('@', '') : '';
+
+            // Clean name
+            name = name.split('•')[0].split('|')[0].split('-')[0].trim();
+            name = name.replace(/\(@[^)]+\)/g, '').trim();
+            name = name.replace(/Instagram.*$/i, '').trim();
+
+            // Filter out garbage names like "Read more", "Call or WhatsApp", or just phone numbers
+            const garbageNames = ['read more', 'call or whatsapp', 'call/whatsapp', 'call', 'whatsapp'];
+            if (garbageNames.includes(name.toLowerCase()) || /^\+?\d[\d\s-]+$/.test(name)) {
+              name = '';
+            }
+
+            // Extract username from multiple sources (priority order)
+            let username = titleHandle;
+
+            // Source 2: Look for "Instagram · username" pattern in block text (Google shows this for every result)
+            if (!username && blockText) {
+              const igDotMatch = blockText.match(/Instagram\s*[·•]\s*([a-zA-Z0-9._]+)/i);
+              if (igDotMatch && igDotMatch[1] && igDotMatch[1].length > 1) {
+                username = '@' + igDotMatch[1];
+              }
+            }
+
+            // Source 3: Extract from URL path (only works for profile links, not /p/ or /reel/)
+            if (!username) {
+              try {
+                const urlObj = new URL(href);
+                const pathParts = urlObj.pathname.split('/').filter(Boolean);
+                if (pathParts.length > 0 && !['p', 'reel', 'tv', 'explore', 'tags', 'stories'].includes(pathParts[0].toLowerCase())) {
+                  username = '@' + pathParts[0];
+                }
+              } catch (e) { }
+            }
+
+            // Build final name: prefer "DisplayName (@username)" format
+            if (!name || name.length < 2 || name === 'Instagram') {
+              // No good display name, just use username
+              name = username || 'Instagram Profile';
+            } else if (username && !name.includes(username)) {
+              // Has both display name and username
+              name = `${name} (${username})`;
+            }
+
+            if (name === 'Instagram Profile') continue;
+
+            const emails = extractEmails(blockText);
+            const email = emails.length > 0 ? emails[0] : 'N/A';
+            const phone = extractPhone(blockText);
+
+            businesses.push({
+              Name: name,
+              Rating: 'N/A',
+              Reviews: '0',
+              Address: 'Instagram Profile',
+              Phone: phone,
+              Website: href,
+              WebsiteStatus: 'NO_WEBSITE',
+              PrimaryEmail: email,
+              AllEmails: emails.join(', '),
+              EmailFound: email !== 'N/A' ? 'YES' : 'NO',
+              Priority: email !== 'N/A' ? 'HIGH' : 'LOW',
+              _username: username // internal field for profile enrichment
+            });
+
+            console.log(`  ✓ ${name} | Email: ${email} | Phone: ${phone}`);
+          } catch (e) {
+            // ignore individual extraction errors
+          }
+        }
+
+        // Try to go to next page
+        await randomDelay(2000, 4000);
+        const nextButton = await page.$('a#pnnext, a[aria-label="Next"], a:has-text("Next")');
+        if (nextButton && pageCount < INSTAGRAM_MAX_PAGES) {
+          console.log("Navigating to next page...");
+          try {
+            await Promise.all([
+              page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }),
+              nextButton.click(),
+            ]);
+            await randomDelay(3000, 5000);
+          } catch (e) {
+            console.log('Failed to navigate to next page:', e.message);
+            hasNextPage = false;
+          }
+        } else {
           hasNextPage = false;
         }
-      } else {
-        hasNextPage = false;
       }
-    }
 
-    console.log(`\n✅ Total Instagram leads extracted: ${businesses.length}`);
+      console.log(`\n✅ Total Instagram leads extracted: ${businesses.length}`);
     } // end fallback browser-scrape path
 
     // ============================================================
@@ -481,7 +522,7 @@ async function scrapeInstagramLeads(query) {
             // Instagram renders bio in a span inside the profile header
             const pageText = await profilePage.innerText('body').catch(() => '');
             bioText = pageText;
-          } catch (e) {}
+          } catch (e) { }
 
           // Combine all text sources for extraction
           const allProfileText = `${metaDesc} ${metaTitle} ${bioText}`;
@@ -507,13 +548,13 @@ async function scrapeInstagramLeads(query) {
                     const url = new URL(href);
                     const redirectUrl = url.searchParams.get('u');
                     if (redirectUrl) return redirectUrl;
-                  } catch (e) {}
+                  } catch (e) { }
                   return href;
                 }
                 // Direct external links (not instagram.com, not facebook.com internal)
                 if (!href.includes('instagram.com') && !href.includes('facebook.com') &&
-                    !href.includes('cdninstagram') && !href.includes('fbcdn') &&
-                    href.startsWith('http') && !href.includes('about.instagram.com')) {
+                  !href.includes('cdninstagram') && !href.includes('fbcdn') &&
+                  href.startsWith('http') && !href.includes('about.instagram.com')) {
                   return href;
                 }
               }
@@ -521,7 +562,7 @@ async function scrapeInstagramLeads(query) {
             }).catch(() => null);
 
             if (externalLink) bioWebsite = externalLink;
-          } catch (e) {}
+          } catch (e) { }
 
           // Also try extracting website URLs from the visible bio text
           if (bioWebsite === 'N/A') {
