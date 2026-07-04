@@ -11,10 +11,9 @@ const { OUTPUT_DIR } = require('../config');
  * @param {string} filePath Target CSV file path
  */
 async function saveToCsv(businesses, filePath) {
-  if (!businesses || businesses.length === 0) {
-    console.log(`No businesses to save for ${filePath}.`);
-    return;
-  }
+  // We want to overwrite the CSV even if there are 0 businesses to prevent stale data.
+  // If it's empty, we'll write an empty array to generate just headers.
+  businesses = businesses || [];
 
   // Ensure output directory exists
   if (!fs.existsSync(OUTPUT_DIR)) {

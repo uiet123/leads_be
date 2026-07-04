@@ -142,7 +142,21 @@ async function main() {
       await saveToCsv(businesses, PRIORITIZED_LEADS_CSV); 
       await saveToCsv(businesses, EMAIL_LEADS_CSV); 
     } else {
-      console.log("No valid businesses were extracted.");
+      if (isInstagram) {
+        console.log("⚠️ No Instagram leads were found. This usually means:");
+        console.log("  1. Google blocked the search (CAPTCHA/rate limit)");
+        console.log("  2. No Instagram profiles matched your query");
+        console.log("  Tip: Try again after some time or use a different search term.");
+      } else {
+        console.log("No valid businesses were extracted.");
+      }
+      
+      // Explicitly save empty arrays to overwrite any stale data from previous searches
+      await saveToCsv([], ALL_LEADS_CSV);
+      await saveToCsv([], NO_WEBSITE_CSV);
+      await saveToCsv([], WEBSITE_LEADS_CSV);
+      await saveToCsv([], PRIORITIZED_LEADS_CSV);
+      await saveToCsv([], EMAIL_LEADS_CSV);
     }
 
   } catch (error) {
